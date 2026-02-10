@@ -1,0 +1,42 @@
+# Gradle
+.gradle/
+.gradle-user-home/
+**/.gradle-user-home/
+
+# Build outputs
+build/
+out/
+
+# Local runtime/modpack jars
+mods/
+libs/
+*.jar
+*.log
+crash-reports/
+logs/
+world/
+config/
+
+# Codex/loom temp dirs
+_tmp_loom/
+_tmp_yarn/
+run/
+
+# Git dirs that got stranded by ACL issues
+.git
+.gitdir/
+.git_bad/
+.git_denied/
+.git_*/
+
+# IDE
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.vscode/
+
+# OS
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,113 @@
+plugins {
+    id 'fabric-loom' version '1.13-SNAPSHOT'
+    id 'maven-publish'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+loom {
+    enableModProvidedJavadoc.set(false)
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        name = "Fabric"
+        url = "https://maven.fabricmc.net/"
+    }
+    maven {
+        name = "modrinth"
+        url = "https://api.modrinth.com/maven"
+    }
+    maven {
+        name = "maven"
+        url = "https://maven.minecraftforge.net/"
+    }
+}
+
+configurations {
+    shadowRuntime
+}
+
+configurations.all {
+    resolutionStrategy {
+        force 'net.java.dev.jna:jna:5.13.0'
+        force 'net.java.dev.jna:jna-platform:5.13.0'
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    // JSON handling
+    implementation 'com.google.code.gson:gson:2.10.1'
+    shadowRuntime 'com.google.code.gson:gson:2.10.1'
+
+    // HTTP client for Discord
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    shadowRuntime 'com.squareup.okhttp3:okhttp:4.12.0'
+
+    // Discord JDA
+    implementation('net.dv8tion:JDA:5.0.0-beta.18') {
+        exclude group: 'net.java.dev.jna', module: 'jna'
+        exclude group: 'net.java.dev.jna', module: 'jna-platform'
+    }
+    shadowRuntime('net.dv8tion:JDA:5.0.0-beta.18') {
+        exclude group: 'net.java.dev.jna', module: 'jna'
+        exclude group: 'net.java.dev.jna', module: 'jna-platform'
+    }
+
+    // JNA (force newer version to avoid OSHI conflicts)
+    implementation 'net.java.dev.jna:jna:5.13.0'
+    implementation 'net.java.dev.jna:jna-platform:5.13.0'
+    shadowRuntime 'net.java.dev.jna:jna:5.13.0'
+    shadowRuntime 'net.java.dev.jna:jna-platform:5.13.0'
+
+    // YAML support (optional, for future)
+    implementation 'org.yaml:snakeyaml:2.0'
+    shadowRuntime 'org.yaml:snakeyaml:2.0'
+}
+
+processResources {
+    inputs.property "version", project.version
+
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.encoding = "UTF-8"
+    it.options.release = 21
+}
+
+java {
+    withSourcesJar()
+
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_${project.base.archivesName.get()}" }
+    }
+}
+
+shadowJar {
+    configurations = [project.configurations.shadowRuntime]
+}
+
+remapJar {
+    dependsOn shadowJar
+    input.set shadowJar.archiveFile
+}
