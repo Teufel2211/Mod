@@ -1,6 +1,7 @@
 param(
     [ValidateSet("release", "beta", "alpha")]
-    [string]$ReleaseType = "release"
+    [string]$ReleaseType = "release",
+    [switch]$ForceUpload
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,6 +28,22 @@ if (-not $env:MODRINTH_PROJECT_ID) {
 }
 if (-not $env:CURSEFORGE_PROJECT_ID) {
     Write-Warning "CURSEFORGE_PROJECT_ID is not set. CurseForge upload will be skipped."
+}
+
+function Get-ModVersion {
+    $line = Get-Content "./gradle.properties" | Where-Object { $_ -match '^mod_version=' } | Select-Object -First 1
+    if (-not $line) { return "unknown" }
+    return ($line -split '=', 2)[1].Trim()
+}
+
+function Get-ReleaseStatePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$Platform
+    )
+    $dir = Join-Path "." ".release-state"
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+    return Join-Path $dir "$Version.$Platform.done"
 }
 
 function Invoke-GradleChecked {
@@ -63,6 +80,8 @@ function Invoke-GradleChecked {
 
 Write-Host "1) Bump version..."
 Invoke-GradleChecked @("bumpModVersion")
+$currentVersion = Get-ModVersion
+Write-Host "Current version: $currentVersion"
 
 Write-Host "2) Build artifact with new version..."
 # Use remapJar to avoid plugin side effects that can hook upload tasks into build.
@@ -77,14 +96,26 @@ $hasCurseforge = ($env:CURSEFORGE_TOKEN -and $env:CURSEFORGE_PROJECT_ID)
 
 if ($hasModrinth) {
     Write-Host "4a) Upload Modrinth..."
-    Invoke-GradleChecked @("modrinth", "-PreleaseType=$ReleaseType") -Retries 3 -DelaySeconds 5
+    $state = Get-ReleaseStatePath -Version $currentVersion -Platform "modrinth"
+    if ((Test-Path $state) -and -not $ForceUpload) {
+        Write-Warning "Skipping Modrinth: version $currentVersion already uploaded (marker exists). Use -ForceUpload to override."
+    } else {
+        Invoke-GradleChecked @("modrinth", "-PreleaseType=$ReleaseType") -Retries 3 -DelaySeconds 5
+        Set-Content -Path $state -Value "$(Get-Date -Format o) releaseType=$ReleaseType"
+    }
 } else {
     Write-Warning "Skipping Modrinth upload (missing token or project id)."
 }
 
 if ($hasCurseforge) {
     Write-Host "4b) Upload CurseForge..."
-    Invoke-GradleChecked @("curseforge", "-PreleaseType=$ReleaseType") -Retries 3 -DelaySeconds 8
+    $state = Get-ReleaseStatePath -Version $currentVersion -Platform "curseforge"
+    if ((Test-Path $state) -and -not $ForceUpload) {
+        Write-Warning "Skipping CurseForge: version $currentVersion already uploaded (marker exists). Use -ForceUpload to override."
+    } else {
+        Invoke-GradleChecked @("curseforge", "-PreleaseType=$ReleaseType") -Retries 3 -DelaySeconds 8
+        Set-Content -Path $state -Value "$(Get-Date -Format o) releaseType=$ReleaseType"
+    }
 } else {
     Write-Warning "Skipping CurseForge upload (missing token or project id)."
 }

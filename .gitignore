@@ -46,3 +46,4 @@ yarn.jar
 build/
 .gradle/
 scripts/release-config.ps1
+.release-state/
