@@ -205,7 +205,9 @@ modrinth {
 tasks.named('modrinth').configure {
     dependsOn(tasks.named('build'), tasks.named('generateReleaseNotes'))
     onlyIf {
-        System.getenv('MODRINTH_TOKEN') && ((findProperty('modrinthProjectId') ?: System.getenv('MODRINTH_PROJECT_ID')) != null)
+        def token = System.getenv('MODRINTH_TOKEN')
+        def pid = (findProperty('modrinthProjectId') ?: System.getenv('MODRINTH_PROJECT_ID') ?: '').toString()
+        token != null && !token.isBlank() && !pid.isBlank()
     }
 }
 
@@ -213,7 +215,7 @@ curseforge {
     apiKey = System.getenv('CURSEFORGE_TOKEN') ?: ''
     def projectIdValue = (findProperty('curseforgeProjectId') ?: System.getenv('CURSEFORGE_PROJECT_ID') ?: '').toString()
     if (projectIdValue) {
-        project(projectIdValue) {
+        project {
             id = projectIdValue
             releaseType = (findProperty('releaseType') ?: System.getenv('RELEASE_TYPE') ?: 'release').toString()
             changelogType = 'markdown'
@@ -234,7 +236,9 @@ curseforge {
 tasks.named('curseforge').configure {
     dependsOn(tasks.named('build'), tasks.named('generateReleaseNotes'))
     onlyIf {
-        System.getenv('CURSEFORGE_TOKEN') && ((findProperty('curseforgeProjectId') ?: System.getenv('CURSEFORGE_PROJECT_ID')) != null)
+        def token = System.getenv('CURSEFORGE_TOKEN')
+        def pid = (findProperty('curseforgeProjectId') ?: System.getenv('CURSEFORGE_PROJECT_ID') ?: '').toString()
+        token != null && !token.isBlank() && !pid.isBlank()
     }
 }
 

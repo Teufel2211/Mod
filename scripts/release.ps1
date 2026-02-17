@@ -29,16 +29,27 @@ if (-not $env:CURSEFORGE_PROJECT_ID) {
     Write-Warning "CURSEFORGE_PROJECT_ID is not set. CurseForge upload will be skipped."
 }
 
+function Invoke-GradleChecked {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Arguments
+    )
+    & ./gradlew $Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Gradle command failed: ./gradlew $Arguments"
+    }
+}
+
 Write-Host "1) Bump version..."
-./gradlew bumpModVersion
+Invoke-GradleChecked "bumpModVersion"
 
 Write-Host "2) Build with new version..."
-./gradlew build -PreleaseType=$ReleaseType
+Invoke-GradleChecked "build -PreleaseType=$ReleaseType"
 
 Write-Host "3) Generate release notes..."
-./gradlew generateReleaseNotes -PreleaseType=$ReleaseType
+Invoke-GradleChecked "generateReleaseNotes -PreleaseType=$ReleaseType"
 
 Write-Host "4) Upload to platforms (if tokens/project ids are set)..."
-./gradlew releaseAll -PreleaseType=$ReleaseType
+Invoke-GradleChecked "releaseAll -PreleaseType=$ReleaseType"
 
 Write-Host "Done."
