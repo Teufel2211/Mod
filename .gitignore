@@ -45,3 +45,4 @@ yarn.jar
 *.log
 build/
 .gradle/
+scripts/release-config.ps1

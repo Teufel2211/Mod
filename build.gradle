@@ -2,6 +2,8 @@ plugins {
     id 'fabric-loom' version '1.13-SNAPSHOT'
     id 'maven-publish'
     id 'com.github.johnrengelman.shadow' version '8.1.1'
+    id 'com.modrinth.minotaur' version '2.8.7'
+    id 'com.matthewprenger.cursegradle' version '1.4.0'
 }
 
 loom {
@@ -122,4 +124,128 @@ shadowJar {
 remapJar {
     dependsOn shadowJar
     input.set shadowJar.archiveFile
+}
+
+def propsFile = file('gradle.properties')
+
+def parseVersion = { String v ->
+    def parts = v.tokenize('.')
+    if (parts.size() != 3) throw new GradleException("mod_version must be MAJOR.MINOR.PATCH, got: ${v}")
+    [parts[0] as int, parts[1] as int, parts[2] as int]
+}
+
+def formatVersion = { int major, int minor, int patch -> "${major}.${minor}.${patch}" }
+
+def nextVersion = { String current ->
+    def (major, minor, patch) = parseVersion(current)
+    if (minor >= 10) {
+        return formatVersion(major + 1, 0, 0)
+    }
+    patch += 1
+    if (patch >= 10) {
+        patch = 0
+        minor += 1
+    }
+    if (minor >= 10) {
+        minor = 0
+        major += 1
+    }
+    formatVersion(major, minor, patch)
+}
+
+tasks.register('bumpModVersion') {
+    group = 'release'
+    description = 'Bumps mod_version using 10-based rollover: 1.0.9->1.1.0, 1.9.9->2.0.0'
+    doLast {
+        def props = new Properties()
+        propsFile.withInputStream { props.load(it) }
+        def current = props.getProperty('mod_version', '1.0.0')
+        def bumped = nextVersion(current)
+        props.setProperty('mod_version', bumped)
+        propsFile.withOutputStream { props.store(it, null) }
+        println "Version bumped: ${current} -> ${bumped}"
+    }
+}
+
+def releaseNotesFile = file("$buildDir/release-notes.md")
+
+tasks.register('generateReleaseNotes') {
+    group = 'release'
+    description = 'Generates release notes from git log and writes build/release-notes.md'
+    doLast {
+        def logText = new ByteArrayOutputStream()
+        exec {
+            commandLine 'git', 'log', '--pretty=format:- %h %s', '-n', '30'
+            standardOutput = logText
+            errorOutput = new ByteArrayOutputStream()
+            ignoreExitValue = true
+        }
+        def notes = logText.toString('UTF-8').trim()
+        if (!notes) notes = '- Maintenance release'
+        releaseNotesFile.parentFile.mkdirs()
+        releaseNotesFile.text = """## ${project.version}\n\n### Changes\n${notes}\n"""
+        println "Release notes generated at ${releaseNotesFile}"
+    }
+}
+
+modrinth {
+    token = System.getenv('MODRINTH_TOKEN') ?: ''
+    projectId = (findProperty('modrinthProjectId') ?: System.getenv('MODRINTH_PROJECT_ID') ?: '').toString()
+    versionNumber = project.version.toString()
+    versionName = "${project.archives_base_name} ${project.version}"
+    versionType = (findProperty('releaseType') ?: System.getenv('RELEASE_TYPE') ?: 'release').toString()
+    uploadFile = remapJar
+    gameVersions = [project.minecraft_version.toString()]
+    loaders = ['fabric']
+    changelog = releaseNotesFile.exists() ? releaseNotesFile.text : "Release ${project.version}"
+    syncBodyFrom = "README.md"
+    failSilently = true
+}
+
+tasks.named('modrinth').configure {
+    dependsOn(tasks.named('build'), tasks.named('generateReleaseNotes'))
+    onlyIf {
+        System.getenv('MODRINTH_TOKEN') && ((findProperty('modrinthProjectId') ?: System.getenv('MODRINTH_PROJECT_ID')) != null)
+    }
+}
+
+curseforge {
+    apiKey = System.getenv('CURSEFORGE_TOKEN') ?: ''
+    def projectIdValue = (findProperty('curseforgeProjectId') ?: System.getenv('CURSEFORGE_PROJECT_ID') ?: '').toString()
+    if (projectIdValue) {
+        project(projectIdValue) {
+            id = projectIdValue
+            releaseType = (findProperty('releaseType') ?: System.getenv('RELEASE_TYPE') ?: 'release').toString()
+            changelogType = 'markdown'
+            changelog = releaseNotesFile.exists() ? releaseNotesFile.text : "Release ${project.version}"
+            addGameVersion project.minecraft_version.toString()
+            addGameVersion 'Fabric'
+            mainArtifact(remapJar) {
+                displayName = "${project.archives_base_name}-${project.version}"
+            }
+        }
+    }
+    options {
+        debug = false
+        javaIntegration = false
+    }
+}
+
+tasks.named('curseforge').configure {
+    dependsOn(tasks.named('build'), tasks.named('generateReleaseNotes'))
+    onlyIf {
+        System.getenv('CURSEFORGE_TOKEN') && ((findProperty('curseforgeProjectId') ?: System.getenv('CURSEFORGE_PROJECT_ID')) != null)
+    }
+}
+
+tasks.register('releaseAll') {
+    group = 'release'
+    description = 'Build + release notes + upload to Modrinth/CurseForge (if tokens are set)'
+    dependsOn tasks.named('build'), tasks.named('generateReleaseNotes'), tasks.named('modrinth'), tasks.named('curseforge')
+}
+
+tasks.register('prepareNextRelease') {
+    group = 'release'
+    description = 'Bump version and generate release notes for next release'
+    dependsOn tasks.named('bumpModVersion'), tasks.named('generateReleaseNotes')
 }

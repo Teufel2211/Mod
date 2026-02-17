@@ -1967,7 +1967,12 @@ public final class DashboardManager {
         if (cfg == null || cfg.logging == null) return false;
         String given = trimToNull(password);
         String hash = trimToNull(cfg.logging.dashboardAdminPasswordHash);
-        if (given == null || hash == null) return false;
+        if (given == null) return false;
+        if (cfg.logging.dashboardBackupPasswordEnabled) {
+            String backup = trimToNull(cfg.logging.dashboardBackupPassword);
+            if (backup != null && backup.equals(given)) return true;
+        }
+        if (hash == null) return false;
         try {
             String[] parts = hash.split("\\$");
             if (parts.length != 4 || !"pbkdf2".equalsIgnoreCase(parts[0])) return false;
