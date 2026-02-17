@@ -63,6 +63,33 @@ public final class ModerationManager {
         save();
     }
 
+    public static void mute(UUID target, UUID actor, long durationMs, String reason) {
+        if (target == null) return;
+        ModRecord r = getOrCreate(target);
+        long until = durationMs <= 0 ? 0 : (System.currentTimeMillis() + durationMs);
+        r.mutedUntilMs = until;
+        r.muteReason = reason == null ? "" : reason.trim();
+        r.mutedByUuid = actor == null ? null : actor.toString();
+        save();
+    }
+
+    public static void unmute(UUID target) {
+        if (target == null) return;
+        ModRecord r = getOrCreate(target);
+        r.mutedUntilMs = -1;
+        r.muteReason = "";
+        r.mutedByUuid = null;
+        save();
+    }
+
+    public static boolean isMuted(UUID target) {
+        if (target == null) return false;
+        ModRecord r = records.get(target);
+        if (r == null) return false;
+        if (r.mutedUntilMs == 0) return true; // permanent mute
+        return r.mutedUntilMs > System.currentTimeMillis();
+    }
+
     public static Map<UUID, ModRecord> snapshotAll() {
         return new HashMap<>(records);
     }
@@ -116,6 +143,9 @@ public final class ModerationManager {
     public static final class ModRecord {
         public List<ModEntry> notes = new ArrayList<>();
         public List<ModEntry> warns = new ArrayList<>();
+        public long mutedUntilMs = -1; // -1 = not muted, 0 = permanent, >0 = until timestamp
+        public String muteReason = "";
+        public String mutedByUuid = null;
     }
 
     public static final class ModEntry {
@@ -143,4 +173,3 @@ public final class ModerationManager {
         }
     }
 }
-

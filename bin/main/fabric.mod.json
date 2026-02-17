@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "id": "core",
+  "version": "${version}",
+  "name": "CraftZone Nexus",
+  "description": "All-in-one Fabric server suite: Anti-Cheat, Economy/Shop, Claims/Clans, Bounty/Wanted, Discord bot/logging, and an optional web dashboard.",
+  "authors": [
+    "Teufel2211"
+  ],
+  "contact": {
+    "homepage": "https://github.com/Teufel2211/Mod",
+    "sources": "https://github.com/Teufel2211/Mod",
+    "issues": "https://github.com/Teufel2211/Mod/issues"
+  },
+  "license": "MIT",
+  "icon": "assets/core/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "core.CoreMod"
+    ],
+    "client": [
+      "core.CoreClient"
+    ]
+  },
+  "mixins": [
+    "core.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.15.11",
+    "minecraft": "~1.21.11",
+    "fabric-api": "*",
+    "voicechat": "*"
+  },
+  "suggests": {
+    "openpartiesandclaims": "*",
+    "xaerosworldmap": "*",
+    "xaerosminimap": "*",
+    "economycraft": "*",
+    "enhancedgroups": "*"
+  }
+}

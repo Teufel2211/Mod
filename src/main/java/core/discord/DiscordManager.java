@@ -15,6 +15,7 @@ import net.dv8tion.jda.api.requests.GatewayIntent;
 import okhttp3.*;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.text.Text;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import core.config.ConfigManager;
@@ -188,6 +189,13 @@ public class DiscordManager {
             Commands.slash("warn", "Add warning to online player")
                 .addOption(OptionType.STRING, "player", "Player name", true)
                 .addOption(OptionType.STRING, "reason", "Warn reason", true)
+            ,
+            Commands.slash("mute", "Mute an online player (blocks chat)")
+                .addOption(OptionType.STRING, "player", "Player name", true)
+                .addOption(OptionType.INTEGER, "minutes", "Duration in minutes (omit/0 = permanent)", false)
+                .addOption(OptionType.STRING, "reason", "Reason", false),
+            Commands.slash("unmute", "Unmute an online player")
+                .addOption(OptionType.STRING, "player", "Player name", true)
         ).queue(
             ignored -> LOGGER.info("Discord slash commands registered"),
             error -> LOGGER.warn("Failed to register discord slash commands", error)
@@ -542,24 +550,16 @@ public class DiscordManager {
             var cfg = ConfigManager.getConfig();
             if (cfg == null || cfg.discord == null || !cfg.discord.enableBidirectionalCommands) return;
 
-            // Check if user has required role
             Member member = event.getMember();
             if (member == null) return;
+            String command = event.getName();
 
-            boolean hasPermission = ConfigManager.getConfig().discord.allowedDiscordRoles.length == 0;
-            for (String roleId : ConfigManager.getConfig().discord.allowedDiscordRoles) {
-                if (member.getRoles().stream().anyMatch(role -> role.getId().equals(roleId))) {
-                    hasPermission = true;
-                    break;
-                }
-            }
-
-            if (!hasPermission) {
-                event.reply("❌ You don't have permission to use this command.").setEphemeral(true).queue();
+            if (!hasCommandPermission(member, command, cfg)) {
+                event.reply("❌ You don't have permission to use this command category.").setEphemeral(true).queue();
                 return;
             }
 
-            switch (event.getName()) {
+            switch (command) {
                 case "ban" -> handleBanCommand(event);
                 case "eco" -> handleEcoCommand(event);
                 case "bounty" -> handleBountyCommand(event);
@@ -589,7 +589,63 @@ public class DiscordManager {
                 case "clans" -> handleClansOverviewCommand(event);
                 case "note" -> handleNoteCommand(event);
                 case "warn" -> handleWarnCommand(event);
+                case "mute" -> handleMuteCommand(event);
+                case "unmute" -> handleUnmuteCommand(event);
             }
+        }
+
+        private boolean hasCommandPermission(Member member, String command, ConfigManager.Config cfg) {
+            if (member == null || command == null || cfg == null || cfg.discord == null) return false;
+            var dc = cfg.discord;
+            if (!dc.enableRoleBasedPermissions) {
+                return hasAnyRole(member, dc.allowedDiscordRoles);
+            }
+
+            String[] fallback = dc.allowedDiscordRoles;
+            if (isSensitiveReadCommand(command)) {
+                return hasAnyRole(member, chooseSpecificOrFallback(dc.sensitiveDiscordRoles, fallback));
+            }
+            if (isControlCommand(command)) {
+                return hasAnyRole(member, chooseSpecificOrFallback(dc.controlDiscordRoles, fallback));
+            }
+            if (isModerationCommand(command)) {
+                return hasAnyRole(member, chooseSpecificOrFallback(dc.moderationDiscordRoles, fallback));
+            }
+            if (isEconomyWriteCommand(command)) {
+                return hasAnyRole(member, chooseSpecificOrFallback(dc.economyDiscordRoles, fallback));
+            }
+            return hasAnyRole(member, chooseSpecificOrFallback(dc.readDiscordRoles, fallback));
+        }
+
+        private String[] chooseSpecificOrFallback(String[] specific, String[] fallback) {
+            if (specific != null && specific.length > 0) return specific;
+            return fallback;
+        }
+
+        private boolean hasAnyRole(Member member, String[] roleIds) {
+            if (member == null) return false;
+            if (roleIds == null || roleIds.length == 0) return true;
+            return member.getRoles().stream().anyMatch(role ->
+                Arrays.stream(roleIds).anyMatch(id -> id != null && !id.isBlank() && id.trim().equals(role.getId())));
+        }
+
+        private boolean isSensitiveReadCommand(String command) {
+            return "inventory".equals(command) || "enderchest".equals(command);
+        }
+
+        private boolean isEconomyWriteCommand(String command) {
+            return "eco".equals(command) || "setbalance".equals(command) || "bounty".equals(command);
+        }
+
+        private boolean isModerationCommand(String command) {
+            return "ban".equals(command) || "kick".equals(command) || "freeze".equals(command) || "unfreeze".equals(command)
+                || "warn".equals(command) || "mute".equals(command) || "unmute".equals(command) || "pardon".equals(command)
+                || "gamemode".equals(command) || "note".equals(command) || "whitelist".equals(command);
+        }
+
+        private boolean isControlCommand(String command) {
+            return "servercmd".equals(command) || "saveall".equals(command) || "announce".equals(command)
+                || "op".equals(command) || "deop".equals(command);
         }
 
         private void handleBanCommand(SlashCommandInteractionEvent event) {
@@ -1164,6 +1220,49 @@ public class DiscordManager {
             }
             ModerationManager.addWarn(p.getUuid(), null, reason);
             event.reply("Warn added for `" + name + "`.").setEphemeral(true).queue();
+        }
+
+        private void handleMuteCommand(SlashCommandInteractionEvent event) {
+            if (!ConfigManager.getConfig().discord.enableRemoteServerCommands) {
+                event.reply("Remote controls are disabled in config.").setEphemeral(true).queue();
+                return;
+            }
+            if (server == null || event.getOption("player") == null) {
+                event.reply("Missing player").setEphemeral(true).queue();
+                return;
+            }
+            String name = event.getOption("player").getAsString().trim();
+            var p = server.getPlayerManager().getPlayer(name);
+            if (p == null) {
+                event.reply("Player `" + name + "` is offline.").setEphemeral(true).queue();
+                return;
+            }
+            long minutes = event.getOption("minutes") == null ? 0 : event.getOption("minutes").getAsLong();
+            String reason = event.getOption("reason") == null ? "" : event.getOption("reason").getAsString().replace('\n', ' ').trim();
+            long durationMs = minutes <= 0 ? 0 : minutes * 60_000L;
+            ModerationManager.mute(p.getUuid(), null, durationMs, reason);
+            p.sendMessage(Text.literal("§cYou have been muted." + (reason.isBlank() ? "" : (" Reason: " + reason))), false);
+            event.reply("Muted `" + name + "`" + (minutes > 0 ? (" for " + minutes + "m") : " (permanent)") + ".").queue();
+        }
+
+        private void handleUnmuteCommand(SlashCommandInteractionEvent event) {
+            if (!ConfigManager.getConfig().discord.enableRemoteServerCommands) {
+                event.reply("Remote controls are disabled in config.").setEphemeral(true).queue();
+                return;
+            }
+            if (server == null || event.getOption("player") == null) {
+                event.reply("Missing player").setEphemeral(true).queue();
+                return;
+            }
+            String name = event.getOption("player").getAsString().trim();
+            var p = server.getPlayerManager().getPlayer(name);
+            if (p == null) {
+                event.reply("Player `" + name + "` is offline.").setEphemeral(true).queue();
+                return;
+            }
+            ModerationManager.unmute(p.getUuid());
+            p.sendMessage(Text.literal("§aYou have been unmuted."), false);
+            event.reply("Unmuted `" + name + "`.").queue();
         }
     }
 

@@ -31,6 +31,7 @@ import core.map.MapCommands;
 import core.announcement.AnnouncementCommands;
 import core.announcement.AnnouncementManager;
 import core.config.ConfigManager;
+import core.config.ConfigCommands;
 import core.menu.MenuCommands;
 import core.network.HandshakeServer;
 import core.world.WorldCommands;
@@ -121,6 +122,7 @@ public class CoreMod implements ModInitializer {
                     }
                     if (systems.worldCommands) context.getSource().sendMessage(Text.literal("§eWorld Commands: /spawn, /rtp [radius]"));
                     if (systems.announcements) context.getSource().sendMessage(Text.literal("§eAnnouncement Commands: /announce chat <msg>, /announce actionbar <msg>, /announce both <msg>, /announce player <player> <msg>, /announce reload"));
+                    context.getSource().sendMessage(Text.literal("§eConfig Commands: /coresettings list, /coresettings export <name>, /coresettings import <name>, /coresettings exportworld <name> <world>"));
                     return 1;
                 })));
 
@@ -177,6 +179,8 @@ public class CoreMod implements ModInitializer {
                 LOGGER.info("Registering AnnouncementCommands...");
                 Safe.run("AnnouncementCommands.register", () -> AnnouncementCommands.register(dispatcher));
             }
+            LOGGER.info("Registering ConfigCommands...");
+            Safe.run("ConfigCommands.register", () -> ConfigCommands.register(dispatcher));
 
             if (systems.antiCheat && cfg.antiCheat.enableAntiCheat) {
                 LOGGER.info("Registering AntiCheatCommands...");

@@ -23,6 +23,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -34,10 +35,14 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
 
 public final class DashboardManager {
     private static final Logger LOGGER = LoggerFactory.getLogger("core");
@@ -49,6 +54,8 @@ public final class DashboardManager {
     private static final Pattern ACTOR_COMMAND_PATTERN = Pattern.compile("\\] ([^\\]]+?) executed:");
     private static final Pattern ACTOR_CHAT_PATTERN = Pattern.compile("\\] ([^:]+): ");
     private static final List<String> CHANNEL_ORDER = List.of("command", "private", "chat", "game", "event");
+    private static final SecureRandom SESSION_RNG = new SecureRandom();
+    private static final Map<String, Session> SESSIONS = new ConcurrentHashMap<>();
 
     private DashboardManager() {}
 
@@ -69,6 +76,8 @@ public final class DashboardManager {
         try {
             httpServer = HttpServer.create(new InetSocketAddress(cfg.logging.dashboardHost, cfg.logging.dashboardPort), 0);
             httpServer.createContext("/", DashboardManager::handleIndex);
+            httpServer.createContext("/login", DashboardManager::handleLogin);
+            httpServer.createContext("/logout", DashboardManager::handleLogout);
             httpServer.createContext("/api/status", DashboardManager::handleStatus);
             httpServer.createContext("/api/players", DashboardManager::handlePlayers);
             httpServer.createContext("/api/events", DashboardManager::handleEvents);
@@ -76,6 +85,7 @@ public final class DashboardManager {
             httpServer.createContext("/api/summary", DashboardManager::handleSummary);
             httpServer.createContext("/api/activity", DashboardManager::handleActivity);
             httpServer.createContext("/api/metrics", DashboardManager::handleMetrics);
+            httpServer.createContext("/api/timeseries", DashboardManager::handleTimeSeries);
             httpServer.createContext("/api/top-commands", DashboardManager::handleTopCommands);
             httpServer.createContext("/api/worlds", DashboardManager::handleWorlds);
             httpServer.createContext("/api/economy/top", DashboardManager::handleEconomyTop);
@@ -116,7 +126,7 @@ public final class DashboardManager {
     }
 
     private static void handleIndex(HttpExchange ex) throws IOException {
-        if (!authorized(ex)) return;
+        if (!authorizedForHtml(ex)) return;
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
             send(ex, 405, "text/plain", "Method not allowed");
             return;
@@ -210,6 +220,10 @@ public final class DashboardManager {
                     <tbody><tr><td colspan='2'>loading...</td></tr></tbody>
                   </table>
                   <br/>
+                  <b>Charts</b>
+                  <div class='hint' style='margin:6px 0 8px 0'>Last 60 minutes (per minute)</div>
+                  <canvas id='chart' width='520' height='180' style='width:100%;height:180px;background:#0e141e;border:1px solid var(--line);border-radius:10px'></canvas>
+                  <br/>
                   <b>Raw Status</b>
                   <pre id='statusRaw' class='mono'>{}</pre>
                 </div>
@@ -252,6 +266,8 @@ public final class DashboardManager {
                     <option value='freeze'>freeze</option>
                     <option value='unfreeze'>unfreeze</option>
                     <option value='reset_violations'>reset_violations</option>
+                    <option value='mute'>mute</option>
+                    <option value='unmute'>unmute</option>
                     <option value='heal'>heal</option>
                     <option value='feed'>feed</option>
                     <option value='kill'>kill</option>
@@ -373,6 +389,51 @@ public final class DashboardManager {
               return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
             }
             function esc(v){return String(v??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+            function drawChart(series){
+              const canvas = document.getElementById('chart');
+              if(!canvas) return;
+              const ctx = canvas.getContext('2d');
+              const w = canvas.width, h = canvas.height;
+              ctx.clearRect(0,0,w,h);
+              ctx.fillStyle = '#0e141e';
+              ctx.fillRect(0,0,w,h);
+              const labels = series.labels || [];
+              const lines = series.series || {};
+              const keys = Object.keys(lines);
+              if(labels.length === 0 || keys.length === 0) return;
+              let max = 1;
+              keys.forEach(k => (lines[k]||[]).forEach(v => { if(v>max) max=v; }));
+              // grid
+              ctx.strokeStyle = '#263243';
+              ctx.lineWidth = 1;
+              for(let i=0;i<=4;i++){
+                const y = 10 + (h-20)*(i/4);
+                ctx.beginPath(); ctx.moveTo(10,y); ctx.lineTo(w-10,y); ctx.stroke();
+              }
+              const colors = {event:'#2dd4ff',chat:'#a78bfa',command:'#9ae6b4',game:'#fbbf24',private:'#fb7185'};
+              keys.forEach(k=>{
+                const arr = lines[k]||[];
+                ctx.strokeStyle = colors[k] || '#e5edf7';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for(let i=0;i<arr.length;i++){
+                  const x = 10 + (w-20) * (i/(arr.length-1));
+                  const y = 10 + (h-20) * (1 - (arr[i]/max));
+                  if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+                }
+                ctx.stroke();
+              });
+              // legend
+              ctx.font = '12px Segoe UI';
+              let lx = 12, ly = 16;
+              keys.forEach(k=>{
+                ctx.fillStyle = colors[k] || '#e5edf7';
+                ctx.fillRect(lx, ly-10, 10, 10);
+                ctx.fillStyle = '#e5edf7';
+                ctx.fillText(k, lx+14, ly);
+                lx += 70;
+              });
+            }
             function fmtDate(v){
               if(!v) return '-';
               try{
@@ -383,7 +444,7 @@ public final class DashboardManager {
             async function load(){
               const limit = Math.max(10, Math.min(500, Number(document.getElementById('limit').value || 80)));
               if(paused) return;
-              const [s,p,e,m,x,a,c,w]=await Promise.all([
+              const [s,p,e,m,x,a,c,w,t]=await Promise.all([
                 fetch(withToken('/api/status')),
                 fetch(withToken('/api/players')),
                 fetch(withToken('/api/events?limit=' + limit)),
@@ -391,7 +452,8 @@ public final class DashboardManager {
                 fetch(withToken('/api/metrics')),
                 fetch(withToken('/api/activity?limit=200')),
                 fetch(withToken('/api/top-commands?limit=300')),
-                fetch(withToken('/api/worlds'))
+                fetch(withToken('/api/worlds')),
+                fetch(withToken('/api/timeseries?minutes=60'))
               ]);
               const status = await s.json();
               const players = await p.json();
@@ -401,6 +463,7 @@ public final class DashboardManager {
               const activity = await a.json();
               const commands = await c.json();
               const worlds = await w.json();
+              const timeseries = await t.json();
 
               if(status.error){throw new Error('status: ' + status.error);}
               if(players.error){throw new Error('players: ' + players.error);}
@@ -410,6 +473,7 @@ public final class DashboardManager {
               if(activity.error){throw new Error('activity: ' + activity.error);}
               if(commands.error){throw new Error('commands: ' + commands.error);}
               if(worlds.error){throw new Error('worlds: ' + worlds.error);}
+              if(timeseries.error){throw new Error('timeseries: ' + timeseries.error);}
 
               document.getElementById('kOnline').textContent = status.online ? 'ONLINE' : 'OFFLINE';
               document.getElementById('kOnline').className = 'value ' + (status.online ? 'ok' : 'err');
@@ -482,6 +546,7 @@ public final class DashboardManager {
               } else {
                 wBody.innerHTML = worldRows.map(r => "<tr><td>" + esc(r.world) + "</td><td>" + esc(r.players) + "</td></tr>").join('');
               }
+              drawChart(timeseries);
               const ov = await fetch(withToken('/api/admin/overview')).then(r=>r.json());
               document.getElementById('adminOverview').textContent = JSON.stringify(ov, null, 2);
             }
@@ -695,6 +760,77 @@ public final class DashboardManager {
         send(ex, 200, "text/html; charset=utf-8", html);
     }
 
+    private static void handleLogin(HttpExchange ex) throws IOException {
+        var cfg = ConfigManager.getConfig();
+        if (cfg == null || cfg.logging == null || !cfg.logging.dashboardLoginEnabled) {
+            send(ex, 404, "text/plain", "Not found");
+            return;
+        }
+
+        if ("GET".equalsIgnoreCase(ex.getRequestMethod())) {
+            String html = """
+                <!doctype html>
+                <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+                <title>Dashboard Login</title>
+                <style>
+                :root{--bg:#0b0f16;--panel:#141a24;--text:#e5edf7;--muted:#8da2ba;--line:#263243;--err:#ff5f6d}
+                *{box-sizing:border-box} body{margin:0;font-family:Segoe UI,system-ui,sans-serif;background:radial-gradient(1200px 600px at 20% -10%,#1b2638 0%,var(--bg) 55%);color:var(--text)}
+                .wrap{max-width:420px;margin:64px auto;padding:0 16px}
+                .card{background:linear-gradient(180deg,var(--panel),#10151f);border:1px solid var(--line);border-radius:14px;padding:16px}
+                .title{font-size:20px;font-weight:700;margin-bottom:6px}
+                .sub{color:var(--muted);font-size:13px;margin-bottom:12px}
+                input{width:100%;background:#0e141e;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:14px}
+                button{margin-top:10px;width:100%;background:#0e141e;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:14px;cursor:pointer}
+                .err{margin-top:10px;color:var(--err);font-size:13px}
+                </style></head>
+                <body><div class="wrap">
+                  <div class="card">
+                    <div class="title">Admin Login</div>
+                    <div class="sub">CraftZone Nexus Dashboard</div>
+                    <form method="post" action="/login">
+                      <input name="password" type="password" placeholder="Password" autofocus />
+                      <button type="submit">Login</button>
+                    </form>
+                    <div class="err" id="err"></div>
+                  </div>
+                </div>
+                <script>
+                  const p=new URLSearchParams(window.location.search);
+                  const e=p.get('e'); if(e){document.getElementById('err').textContent=e;}
+                </script>
+                </body></html>
+                """;
+            send(ex, 200, "text/html; charset=utf-8", html);
+            return;
+        }
+
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            send(ex, 405, "text/plain", "Method not allowed");
+            return;
+        }
+        String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        String password = parseFormValue(body, "password");
+        if (!verifyDashboardPassword(password)) {
+            redirect(ex, "/login?e=Invalid%20password");
+            return;
+        }
+        String sid = newSessionId();
+        long ttlMs = Math.max(5, cfg.logging.dashboardSessionMinutes) * 60_000L;
+        SESSIONS.put(sid, new Session(System.currentTimeMillis() + ttlMs));
+        setSessionCookie(ex, sid, cfg.logging.dashboardCookieSecure);
+        redirect(ex, "/");
+    }
+
+    private static void handleLogout(HttpExchange ex) throws IOException {
+        var cfg = ConfigManager.getConfig();
+        String sid = getCookie(ex, "core_session");
+        if (sid != null) SESSIONS.remove(sid);
+        if (cfg != null && cfg.logging != null) {
+            clearSessionCookie(ex, cfg.logging.dashboardCookieSecure);
+        }
+        redirect(ex, "/login");
+    }
+
     private static void handleStatus(HttpExchange ex) throws IOException {
         if (!authorized(ex)) return;
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
@@ -864,6 +1000,49 @@ public final class DashboardManager {
         sendJson(ex, out);
     }
 
+    private static void handleTimeSeries(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) return;
+        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+            send(ex, 405, "application/json", "{\"error\":\"method_not_allowed\"}");
+            return;
+        }
+        var q = query(ex);
+        int minutes = parseInt(q.get("minutes"), 60);
+        minutes = Math.max(5, Math.min(minutes, 6 * 60));
+        long now = System.currentTimeMillis();
+        long since = now - (minutes * 60_000L);
+        int buckets = minutes;
+
+        String[] channels = new String[]{"event", "chat", "command", "game", "private"};
+        Map<String, int[]> series = new LinkedHashMap<>();
+        for (String c : channels) series.put(c, new int[buckets]);
+
+        for (var e : LoggingManager.getRecentLogsSince(since, 5000)) {
+            int idx = (int) ((e.timestamp - since) / 60_000L);
+            if (idx < 0 || idx >= buckets) continue;
+            int[] arr = series.get(e.channel == null ? "" : e.channel.toLowerCase(Locale.ROOT));
+            if (arr != null) arr[idx]++;
+        }
+
+        List<String> labels = new java.util.ArrayList<>(buckets);
+        for (int i = 0; i < buckets; i++) {
+            labels.add(String.valueOf(i - (buckets - 1))); // relative minutes
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("minutes", minutes);
+        out.put("labels", labels);
+        Map<String, List<Integer>> outSeries = new LinkedHashMap<>();
+        for (var entry : series.entrySet()) {
+            int[] arr = entry.getValue();
+            List<Integer> vals = new java.util.ArrayList<>(arr.length);
+            for (int v : arr) vals.add(v);
+            outSeries.put(entry.getKey(), vals);
+        }
+        out.put("series", outSeries);
+        sendJson(ex, out);
+    }
+
     private static void handleTopCommands(HttpExchange ex) throws IOException {
         if (!authorized(ex)) return;
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
@@ -1021,7 +1200,7 @@ public final class DashboardManager {
     }
 
     private static void handleClaimsUnclaim(HttpExchange ex) throws IOException {
-        if (!authorized(ex)) return;
+        if (!authorized(ex, true)) return;
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
             send(ex, 405, "application/json", "{\"error\":\"method_not_allowed\"}");
             return;
@@ -1044,7 +1223,7 @@ public final class DashboardManager {
     }
 
     private static void handleClaimsPermission(HttpExchange ex) throws IOException {
-        if (!authorized(ex)) return;
+        if (!authorized(ex, true)) return;
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
             send(ex, 405, "application/json", "{\"error\":\"method_not_allowed\"}");
             return;
@@ -1102,7 +1281,7 @@ public final class DashboardManager {
     }
 
     private static void handleClansAction(HttpExchange ex) throws IOException {
-        if (!authorized(ex)) return;
+        if (!authorized(ex, true)) return;
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
             send(ex, 405, "application/json", "{\"error\":\"method_not_allowed\"}");
             return;
@@ -1167,7 +1346,7 @@ public final class DashboardManager {
     }
 
     private static void handleModNote(HttpExchange ex) throws IOException {
-        if (!authorized(ex)) return;
+        if (!authorized(ex, true)) return;
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
             send(ex, 405, "application/json", "{\"error\":\"method_not_allowed\"}");
             return;
@@ -1200,7 +1379,7 @@ public final class DashboardManager {
     }
 
     private static void handleModWarn(HttpExchange ex) throws IOException {
-        if (!authorized(ex)) return;
+        if (!authorized(ex, true)) return;
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
             send(ex, 405, "application/json", "{\"error\":\"method_not_allowed\"}");
             return;
@@ -1229,7 +1408,7 @@ public final class DashboardManager {
     // On hosts like GPortal, use built-in backup tools or a dedicated backup mod/plugin.
 
     private static void handleControlCommand(HttpExchange ex) throws IOException {
-        if (!authorized(ex)) return;
+        if (!authorized(ex, true)) return;
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
             send(ex, 405, "application/json", "{\"error\":\"method_not_allowed\"}");
             return;
@@ -1320,7 +1499,7 @@ public final class DashboardManager {
     }
 
     private static void handlePlayerInventory(HttpExchange ex) throws IOException {
-        if (!authorized(ex)) return;
+        if (!authorized(ex, true)) return;
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
             send(ex, 405, "application/json", "{\"error\":\"method_not_allowed\"}");
             return;
@@ -1347,7 +1526,7 @@ public final class DashboardManager {
     }
 
     private static void handlePlayerEnderChest(HttpExchange ex) throws IOException {
-        if (!authorized(ex)) return;
+        if (!authorized(ex, true)) return;
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
             send(ex, 405, "application/json", "{\"error\":\"method_not_allowed\"}");
             return;
@@ -1374,7 +1553,7 @@ public final class DashboardManager {
     }
 
     private static void handlePlayerAction(HttpExchange ex) throws IOException {
-        if (!authorized(ex)) return;
+        if (!authorized(ex, true)) return;
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
             send(ex, 405, "application/json", "{\"error\":\"method_not_allowed\"}");
             return;
@@ -1413,6 +1592,22 @@ public final class DashboardManager {
             case "freeze" -> cmd = "ac freeze " + p.getName().getString();
             case "unfreeze" -> cmd = "ac unfreeze " + p.getName().getString();
             case "reset_violations" -> cmd = "ac reset " + p.getName().getString();
+            case "mute" -> {
+                long minutes = 0;
+                String reason = value == null ? "" : value.trim();
+                // Accept formats: "10 reason..." or just "reason" (permanent)
+                try {
+                    String[] parts = reason.split("\\s+", 2);
+                    if (parts.length > 0 && parts[0].matches("\\d+")) {
+                        minutes = Long.parseLong(parts[0]);
+                        reason = parts.length > 1 ? parts[1] : "";
+                    }
+                } catch (Exception ignored) {
+                }
+                long durationMs = minutes <= 0 ? 0 : minutes * 60_000L;
+                ModerationManager.mute(p.getUuid(), null, durationMs, reason);
+            }
+            case "unmute" -> ModerationManager.unmute(p.getUuid());
             case "heal" -> {
                 p.setHealth(p.getMaxHealth());
                 p.setAir(p.getMaxAir());
@@ -1459,7 +1654,7 @@ public final class DashboardManager {
     }
 
     private static void handleAdminOverview(HttpExchange ex) throws IOException {
-        if (!authorized(ex)) return;
+        if (!authorized(ex, true)) return;
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
             send(ex, 405, "application/json", "{\"error\":\"method_not_allowed\"}");
             return;
@@ -1643,11 +1838,47 @@ public final class DashboardManager {
     }
 
     private static boolean authorized(HttpExchange ex) throws IOException {
+        return authorized(ex, false);
+    }
+
+    private static boolean authorizedForHtml(HttpExchange ex) throws IOException {
         var cfg = ConfigManager.getConfig();
-        if (cfg == null || cfg.logging == null || cfg.logging.dashboardToken == null || cfg.logging.dashboardToken.isBlank()) {
+        if (cfg == null || cfg.logging == null) return true;
+        if (!ipAllowed(ex, cfg, true)) return false;
+
+        // If login flow is enabled, browser UI requires a valid session.
+        if (cfg.logging.dashboardLoginEnabled) {
+            if (isValidSession(ex, cfg)) return true;
+            redirect(ex, "/login");
+            return false;
+        }
+
+        // Fallback to token-based auth for HTML when login is disabled.
+        return authorized(ex, false);
+    }
+
+    private static boolean authorized(HttpExchange ex, boolean requireAdmin) throws IOException {
+        var cfg = ConfigManager.getConfig();
+        if (cfg == null || cfg.logging == null) {
             return true;
         }
-        String cfgToken = cfg.logging.dashboardToken.trim();
+
+        if (!ipAllowed(ex, cfg, false)) return false;
+
+        // Session cookie is treated as admin access for API calls.
+        if (cfg.logging.dashboardLoginEnabled && isValidSession(ex, cfg)) {
+            return true;
+        }
+
+        String legacyAdmin = trimToNull(cfg.logging.dashboardToken);
+        String readTokenCfg = trimToNull(cfg.logging.dashboardReadToken);
+        String adminTokenCfg = trimToNull(cfg.logging.dashboardAdminToken);
+        if (adminTokenCfg == null && legacyAdmin != null) adminTokenCfg = legacyAdmin;
+
+        if (readTokenCfg == null && adminTokenCfg == null) {
+            return true;
+        }
+
         String headerToken = trimToNull(ex.getRequestHeaders().getFirst("X-Core-Token"));
         String queryToken = trimToNull(getQueryToken(ex));
         String authHeader = trimToNull(ex.getRequestHeaders().getFirst("Authorization"));
@@ -1655,12 +1886,156 @@ public final class DashboardManager {
             ? trimToNull(authHeader.substring(7))
             : null;
 
-        if (cfgToken.equals(headerToken) || cfgToken.equals(queryToken) || cfgToken.equals(bearerToken)) {
-            return true;
+        String provided = headerToken != null ? headerToken : (queryToken != null ? queryToken : bearerToken);
+        if (provided == null) {
+            send(ex, 401, "application/json", "{\"error\":\"unauthorized\"}");
+            return false;
         }
+
+        boolean isAdmin = adminTokenCfg != null && adminTokenCfg.equals(provided);
+        boolean isRead = readTokenCfg != null && readTokenCfg.equals(provided);
+
+        if (requireAdmin) {
+            if (isAdmin) return true;
+            send(ex, 403, "application/json", "{\"error\":\"admin_required\"}");
+            return false;
+        }
+
+        if (isAdmin || isRead) return true;
         send(ex, 401, "application/json", "{\"error\":\"unauthorized\"}");
         return false;
     }
+
+    private static boolean ipAllowed(HttpExchange ex, ConfigManager.Config cfg, boolean html) throws IOException {
+        if (cfg == null || cfg.logging == null) return true;
+        if (cfg.logging.dashboardAllowedIps == null || cfg.logging.dashboardAllowedIps.length == 0) return true;
+
+        String ip = ex.getRemoteAddress() == null || ex.getRemoteAddress().getAddress() == null
+            ? null
+            : ex.getRemoteAddress().getAddress().getHostAddress();
+
+        boolean allowed = false;
+        if (ip != null) {
+            for (String allowedIp : cfg.logging.dashboardAllowedIps) {
+                if (allowedIp != null && !allowedIp.isBlank() && ip.equals(allowedIp.trim())) {
+                    allowed = true;
+                    break;
+                }
+            }
+        }
+        if (allowed) return true;
+
+        if (html) {
+            send(ex, 403, "text/plain; charset=utf-8", "ip_not_allowed");
+        } else {
+            send(ex, 403, "application/json", "{\"error\":\"ip_not_allowed\"}");
+        }
+        return false;
+    }
+
+    private static boolean isValidSession(HttpExchange ex, ConfigManager.Config cfg) {
+        if (cfg == null || cfg.logging == null || !cfg.logging.dashboardLoginEnabled) return false;
+        String sid = getCookie(ex, "core_session");
+        if (sid == null) return false;
+        Session session = SESSIONS.get(sid);
+        if (session == null) return false;
+        long now = System.currentTimeMillis();
+        if (session.expiresAtMs <= now) {
+            SESSIONS.remove(sid);
+            return false;
+        }
+        return true;
+    }
+
+    private static String parseFormValue(String body, String key) {
+        if (body == null || body.isBlank() || key == null || key.isBlank()) return "";
+        String prefix = key + "=";
+        for (String part : body.split("&")) {
+            if (!part.startsWith(prefix)) continue;
+            String raw = part.substring(prefix.length());
+            try {
+                return URLDecoder.decode(raw, StandardCharsets.UTF_8).trim();
+            } catch (Exception ignored) {
+                return raw.trim();
+            }
+        }
+        return "";
+    }
+
+    private static boolean verifyDashboardPassword(String password) {
+        var cfg = ConfigManager.getConfig();
+        if (cfg == null || cfg.logging == null) return false;
+        String given = trimToNull(password);
+        String hash = trimToNull(cfg.logging.dashboardAdminPasswordHash);
+        if (given == null || hash == null) return false;
+        try {
+            String[] parts = hash.split("\\$");
+            if (parts.length != 4 || !"pbkdf2".equalsIgnoreCase(parts[0])) return false;
+            int iterations = Integer.parseInt(parts[1]);
+            byte[] salt = Base64.getDecoder().decode(parts[2]);
+            byte[] expected = Base64.getDecoder().decode(parts[3]);
+            PBEKeySpec spec = new PBEKeySpec(given.toCharArray(), salt, iterations, expected.length * 8);
+            SecretKeyFactory skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+            byte[] actual = skf.generateSecret(spec).getEncoded();
+            return constantTimeEquals(expected, actual);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static boolean constantTimeEquals(byte[] a, byte[] b) {
+        if (a == null || b == null || a.length != b.length) return false;
+        int r = 0;
+        for (int i = 0; i < a.length; i++) r |= (a[i] ^ b[i]);
+        return r == 0;
+    }
+
+    private static String newSessionId() {
+        byte[] token = new byte[32];
+        SESSION_RNG.nextBytes(token);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(token);
+    }
+
+    private static void setSessionCookie(HttpExchange ex, String sid, boolean secure) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("core_session=").append(sid).append("; Path=/; HttpOnly; SameSite=Strict");
+        if (secure) sb.append("; Secure");
+        ex.getResponseHeaders().add("Set-Cookie", sb.toString());
+    }
+
+    private static void clearSessionCookie(HttpExchange ex, boolean secure) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("core_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
+        if (secure) sb.append("; Secure");
+        ex.getResponseHeaders().add("Set-Cookie", sb.toString());
+    }
+
+    private static String getCookie(HttpExchange ex, String name) {
+        if (ex == null || name == null || name.isBlank()) return null;
+        List<String> cookieHeaders = ex.getRequestHeaders().get("Cookie");
+        if (cookieHeaders == null || cookieHeaders.isEmpty()) return null;
+        for (String header : cookieHeaders) {
+            if (header == null || header.isBlank()) continue;
+            String[] parts = header.split(";");
+            for (String part : parts) {
+                String trimmed = part.trim();
+                int idx = trimmed.indexOf('=');
+                if (idx <= 0) continue;
+                String k = trimmed.substring(0, idx).trim();
+                if (!name.equals(k)) continue;
+                return trimmed.substring(idx + 1).trim();
+            }
+        }
+        return null;
+    }
+
+    private static void redirect(HttpExchange ex, String location) throws IOException {
+        ex.getResponseHeaders().set("Location", location);
+        ex.sendResponseHeaders(302, -1);
+        ex.close();
+    }
+
+    private record Session(long expiresAtMs) {}
 
     private static String trimToNull(String raw) {
         if (raw == null) return null;

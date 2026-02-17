@@ -48,10 +48,13 @@ public class LoggingManager {
         return t;
     });
     private static final Deque<RecentLogEntry> RECENT_LOGS = new ArrayDeque<>();
-    private static final int RECENT_LOG_LIMIT = 500;
+    // Used for dashboard charts + discord views. Keep this reasonably bounded.
+    private static final int RECENT_LOG_LIMIT = 5000;
     private static final long COMMAND_DEDUPE_WINDOW_MS = 1000L;
+    private static final long RECENT_DEDUPE_WINDOW_MS = 1250L;
     private static volatile boolean initialized = false;
     private static final Map<UUID, LastCommand> LAST_COMMANDS = new ConcurrentHashMap<>();
+    private static final Map<String, LastRecent> LAST_RECENT_BY_CHANNEL = new ConcurrentHashMap<>();
 
     public static void init() {
         if (initialized) return;
@@ -161,6 +164,7 @@ public class LoggingManager {
     }
 
     private record LastCommand(String command, long timestampMs) {}
+    private record LastRecent(String canonical, long timestampMs) {}
 
     private static void logEvent(String type, ServerPlayerEntity player, String details) {
         String msg = "[" + LocalDateTime.now().format(FORMATTER) + "] " + type + ": " + player.getName().getString();
@@ -199,6 +203,7 @@ public class LoggingManager {
     }
 
     private static void pushRecent(String channel, String line) {
+        if (isDuplicateRecent(channel, line)) return;
         synchronized (RECENT_LOGS) {
             RECENT_LOGS.addFirst(new RecentLogEntry(System.currentTimeMillis(), channel, line));
             while (RECENT_LOGS.size() > RECENT_LOG_LIMIT) {
@@ -207,12 +212,40 @@ public class LoggingManager {
         }
     }
 
+    private static boolean isDuplicateRecent(String channel, String line) {
+        if (channel == null || line == null) return false;
+        String canonical = canonicalRecentMessage(line);
+        long now = System.currentTimeMillis();
+        LastRecent prev = LAST_RECENT_BY_CHANNEL.put(channel, new LastRecent(canonical, now));
+        return prev != null && prev.canonical.equals(canonical) && (now - prev.timestampMs) < RECENT_DEDUPE_WINDOW_MS;
+    }
+
+    private static String canonicalRecentMessage(String line) {
+        int idx = line.indexOf("] ");
+        if (idx >= 0 && (idx + 2) < line.length()) return line.substring(idx + 2);
+        return line;
+    }
+
     public static List<RecentLogEntry> getRecentLogs(int limit) {
         int capped = Math.max(1, Math.min(limit, RECENT_LOG_LIMIT));
         List<RecentLogEntry> out = new ArrayList<>(capped);
         synchronized (RECENT_LOGS) {
             int i = 0;
             for (RecentLogEntry entry : RECENT_LOGS) {
+                if (i++ >= capped) break;
+                out.add(entry);
+            }
+        }
+        return out;
+    }
+
+    public static List<RecentLogEntry> getRecentLogsSince(long sinceEpochMs, int limit) {
+        int capped = Math.max(1, Math.min(limit, RECENT_LOG_LIMIT));
+        List<RecentLogEntry> out = new ArrayList<>(capped);
+        synchronized (RECENT_LOGS) {
+            int i = 0;
+            for (RecentLogEntry entry : RECENT_LOGS) {
+                if (entry.timestamp < sinceEpochMs) continue;
                 if (i++ >= capped) break;
                 out.add(entry);
             }
