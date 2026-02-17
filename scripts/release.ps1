@@ -32,24 +32,26 @@ if (-not $env:CURSEFORGE_PROJECT_ID) {
 function Invoke-GradleChecked {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Arguments
+        [string[]]$Arguments
     )
-    & ./gradlew $Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Gradle command failed: ./gradlew $Arguments"
+    & ./gradlew @Arguments
+    $exitCode = $LASTEXITCODE
+    if ($null -eq $exitCode) { $exitCode = 0 }
+    if ($exitCode -ne 0) {
+        throw "Gradle command failed (exit $exitCode): ./gradlew $($Arguments -join ' ')"
     }
 }
 
 Write-Host "1) Bump version..."
-Invoke-GradleChecked "bumpModVersion"
+Invoke-GradleChecked @("bumpModVersion")
 
 Write-Host "2) Build with new version..."
-Invoke-GradleChecked "build -PreleaseType=$ReleaseType"
+Invoke-GradleChecked @("build", "-PreleaseType=$ReleaseType")
 
 Write-Host "3) Generate release notes..."
-Invoke-GradleChecked "generateReleaseNotes -PreleaseType=$ReleaseType"
+Invoke-GradleChecked @("generateReleaseNotes", "-PreleaseType=$ReleaseType")
 
 Write-Host "4) Upload to platforms (if tokens/project ids are set)..."
-Invoke-GradleChecked "releaseAll -PreleaseType=$ReleaseType"
+Invoke-GradleChecked @("releaseAll", "-PreleaseType=$ReleaseType")
 
 Write-Host "Done."
