@@ -318,9 +318,11 @@ function Invoke-GradleChecked {
         if ($null -eq $exitCode) { $exitCode = 0 }
         $outText = ($gradleOut | ForEach-Object { $_.ToString() }) -join "`n"
         $isSuccessful = $outText -match "BUILD SUCCESSFUL"
+        $isFailed = $outText -match "BUILD FAILED" -or $outText -match "FAILURE: Build failed"
 
-        if ($exitCode -ne 0 -and $isSuccessful) {
-            Write-Warning "Gradle returned exit $exitCode but reported BUILD SUCCESSFUL. Continuing."
+        # Some Gradle/plugin combinations return non-zero even when the build is successful.
+        # Treat it as success only when the log clearly reports success and no failure markers.
+        if ($exitCode -ne 0 -and $isSuccessful -and -not $isFailed) {
             return $outText
         }
         if ($exitCode -eq 0) {
@@ -377,6 +379,7 @@ function Invoke-Rollback {
         [int]$StartIndex = 0
     )
     Write-Warning "Release failed. Starting rollback..."
+    $warnedCurseforgeManualDelete = $false
 
     if ($StartIndex -lt 0) { $StartIndex = 0 }
     if ($StartIndex -gt $uploadRecords.Count) { $StartIndex = $uploadRecords.Count }
@@ -386,7 +389,10 @@ function Invoke-Rollback {
         if ($rec.Platform -eq "modrinth" -and $rec.VersionId) {
             Remove-ModrinthVersion -VersionId $rec.VersionId
         } elseif ($rec.Platform -eq "curseforge") {
-            Write-Warning "Rollback: CurseForge API delete is not supported by this script. Remove upload manually if needed."
+            if (-not $warnedCurseforgeManualDelete) {
+                Write-Warning "Rollback: CurseForge API delete is not supported by this script. Remove CurseForge uploads manually if needed."
+                $warnedCurseforgeManualDelete = $true
+            }
         }
 
         if ($rec.StatePath -and (Test-Path $rec.StatePath)) {
