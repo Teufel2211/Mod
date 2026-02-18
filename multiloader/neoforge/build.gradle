@@ -55,6 +55,7 @@ curseforge {
     def projectIdValue = (findProperty("curseforgeProjectIdNeoForge") ?: System.getenv("CURSEFORGE_PROJECT_ID_NEOFORGE") ?: System.getenv("CURSEFORGE_PROJECT_ID") ?: "").toString()
     def minecraftTag = (findProperty("curseforgeMinecraftVersion") ?: System.getenv("CURSEFORGE_MINECRAFT_VERSION") ?: project.minecraft_version.toString()).toString()
     def javaTag = (findProperty("curseforgeJavaVersion") ?: System.getenv("CURSEFORGE_JAVA_VERSION") ?: "Java 25").toString()
+    def remapJarFile = tasks.named("remapJar").get().archiveFile.get().asFile
     if (projectIdValue) {
         project {
             id = projectIdValue
@@ -66,7 +67,7 @@ curseforge {
             addGameVersion "Server"
             addGameVersion javaTag
             addGameVersion "NeoForge"
-            mainArtifact(tasks.named("remapJar")) {
+            mainArtifact(remapJarFile) {
                 displayName = "Core Mod ${project.version} (NeoForge)"
             }
         }
