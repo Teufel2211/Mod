@@ -22,7 +22,8 @@ public final class FabricDashboardBridge {
         DashboardService.setControlBridge(command ->
             Safe.call("FabricDashboardBridge.command", () -> {
                 if (serverRef == null || command == null || command.isBlank()) return false;
-                serverRef.getCommandManager().executeWithPrefix(serverRef.getCommandSource(), command);
+                String normalized = command.startsWith("/") ? command.substring(1) : command;
+                serverRef.getCommandManager().getDispatcher().execute(normalized, serverRef.getCommandSource());
                 return true;
             }, false));
 

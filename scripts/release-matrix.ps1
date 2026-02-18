@@ -4,11 +4,17 @@ param(
     [string]$ReleaseType = "release",
     [switch]$ForceUpload,
     [switch]$SkipFailedLanes,
-    [switch]$AutoResolveDeps
+    [switch]$AutoResolveDeps,
+    [switch]$StrictLaneComplete
 )
 
-$args = @("-Matrix", "-LaneFile", $LaneFile, "-ReleaseType", $ReleaseType)
-if ($ForceUpload) { $args += "-ForceUpload" }
-if ($SkipFailedLanes) { $args += "-SkipFailedLanes" }
-if ($AutoResolveDeps) { $args += "-AutoResolveDeps" }
-& "$PSScriptRoot/release.ps1" @args
+$params = @{
+    Matrix = $true
+    LaneFile = $LaneFile
+    ReleaseType = $ReleaseType
+}
+if ($ForceUpload) { $params.ForceUpload = $true }
+if ($SkipFailedLanes) { $params.SkipFailedLanes = $true }
+if ($AutoResolveDeps) { $params.AutoResolveDeps = $true }
+if ($StrictLaneComplete) { $params.StrictLaneComplete = $true }
+& "$PSScriptRoot/release.ps1" @params

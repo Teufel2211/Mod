@@ -61,6 +61,9 @@ curseforge {
     def projectIdValue = (findProperty("curseforgeProjectIdForge") ?: System.getenv("CURSEFORGE_PROJECT_ID_FORGE") ?: System.getenv("CURSEFORGE_PROJECT_ID") ?: "").toString()
     def minecraftTag = (findProperty("curseforgeMinecraftVersion") ?: System.getenv("CURSEFORGE_MINECRAFT_VERSION") ?: project.minecraft_version.toString()).toString()
     def javaTag = (findProperty("curseforgeJavaVersion") ?: System.getenv("CURSEFORGE_JAVA_VERSION") ?: "Java 25").toString()
+    def addEnvTags = (findProperty("curseforgeAddEnvTags") ?: System.getenv("CURSEFORGE_ADD_ENV_TAGS") ?: "false").toString().toBoolean()
+    def clientEnvTag = (findProperty("curseforgeClientEnvTag") ?: System.getenv("CURSEFORGE_CLIENT_ENV_TAG") ?: "").toString()
+    def serverEnvTag = (findProperty("curseforgeServerEnvTag") ?: System.getenv("CURSEFORGE_SERVER_ENV_TAG") ?: "").toString()
     def remapJarFile = tasks.named("remapJar").get().archiveFile.get().asFile
     if (projectIdValue) {
         project {
@@ -69,8 +72,8 @@ curseforge {
             changelogType = "markdown"
             changelog = releaseNotesFile.exists() ? releaseNotesFile.text : "Release ${project.version}"
             addGameVersion minecraftTag
-            addGameVersion "Client"
-            addGameVersion "Server"
+            if (addEnvTags && clientEnvTag) { addGameVersion clientEnvTag }
+            if (addEnvTags && serverEnvTag) { addGameVersion serverEnvTag }
             addGameVersion javaTag
             addGameVersion "Forge"
             mainArtifact(remapJarFile) {

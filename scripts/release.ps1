@@ -6,7 +6,8 @@ param(
     [string]$LaneFile = "scripts/minecraft-lanes.json",
     [switch]$GenerateLaneTemplate,
     [switch]$SkipFailedLanes,
-    [switch]$AutoResolveDeps
+    [switch]$AutoResolveDeps,
+    [switch]$StrictLaneComplete
 )
 
 $ErrorActionPreference = "Stop"
@@ -107,21 +108,31 @@ function Get-GradleProperty {
 
 function Invoke-JsonGet {
     param([Parameter(Mandatory = $true)][string]$Url)
-    try {
-        return Invoke-RestMethod -Method Get -Uri $Url -TimeoutSec 25
-    } catch {
-        Write-Warning "Auto-resolve request failed: $Url"
-        return $null
+    for ($i = 1; $i -le 3; $i++) {
+        try {
+            return Invoke-RestMethod -Method Get -Uri $Url -TimeoutSec 25 -Headers @{ "User-Agent" = "core-mod-release-script" }
+        } catch {
+            if ($i -eq 3) {
+                Write-Warning "Auto-resolve request failed: $Url ($($_.Exception.Message))"
+                return $null
+            }
+            Start-Sleep -Seconds 1
+        }
     }
 }
 
 function Invoke-TextGet {
     param([Parameter(Mandatory = $true)][string]$Url)
-    try {
-        return Invoke-WebRequest -Method Get -Uri $Url -TimeoutSec 25
-    } catch {
-        Write-Warning "Auto-resolve request failed: $Url"
-        return $null
+    for ($i = 1; $i -le 3; $i++) {
+        try {
+            return Invoke-WebRequest -Method Get -Uri $Url -TimeoutSec 25 -Headers @{ "User-Agent" = "core-mod-release-script" }
+        } catch {
+            if ($i -eq 3) {
+                Write-Warning "Auto-resolve request failed: $Url ($($_.Exception.Message))"
+                return $null
+            }
+            Start-Sleep -Seconds 1
+        }
     }
 }
 
@@ -139,15 +150,37 @@ function Select-LatestVersion {
     return ($clean | Sort-Object { Get-VersionWeight $_ } -Descending | Select-Object -First 1)
 }
 
+function Compare-MinecraftVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$A,
+        [Parameter(Mandatory = $true)][string]$B
+    )
+    $ap = $A.Split(".") | ForEach-Object { [int]$_ }
+    $bp = $B.Split(".") | ForEach-Object { [int]$_ }
+    $max = [Math]::Max($ap.Count, $bp.Count)
+    for ($i = 0; $i -lt $max; $i++) {
+        $av = if ($i -lt $ap.Count) { $ap[$i] } else { 0 }
+        $bv = if ($i -lt $bp.Count) { $bp[$i] } else { 0 }
+        if ($av -lt $bv) { return -1 }
+        if ($av -gt $bv) { return 1 }
+    }
+    return 0
+}
+
 function Get-ForgeVersionForMc {
     param([Parameter(Mandatory = $true)][string]$MinecraftVersion)
-    $json = Invoke-JsonGet -Url "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
-    if (-not $json -or -not $json.promos) { return "" }
-    $latestKey = "$MinecraftVersion-latest"
-    $recommendedKey = "$MinecraftVersion-recommended"
-    if ($json.promos.PSObject.Properties.Name -contains $recommendedKey) { return $json.promos.$recommendedKey.ToString() }
-    if ($json.promos.PSObject.Properties.Name -contains $latestKey) { return $json.promos.$latestKey.ToString() }
-    return ""
+    $resp = Invoke-TextGet -Url "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml"
+    if (-not $resp) { return "" }
+    try {
+        [xml]$xml = $resp.Content
+        $all = @($xml.metadata.versioning.versions.version | ForEach-Object { $_.ToString() })
+        $prefix = "$MinecraftVersion-"
+        $filtered = $all | Where-Object { $_ -like "$prefix*" }
+        if (-not $filtered -or $filtered.Count -eq 0) { return "" }
+        return Select-LatestVersion -Versions $filtered
+    } catch {
+        return ""
+    }
 }
 
 function Get-NeoForgeVersionForMc {
@@ -227,6 +260,13 @@ function Resolve-DependenciesForMc {
         neoforge_version = Get-NeoForgeVersionForMc -MinecraftVersion $MinecraftVersion
         architectury_api_version = Get-ArchitecturyVersion
     }
+
+    # Toolchain guard: Forge lanes below 1.20.4 currently fail during setup
+    # (missing bootstrap-dev artifact in current Loom/Forge combo).
+    if ((Compare-MinecraftVersion -A $MinecraftVersion -B "1.20.4") -lt 0) {
+        $resolved.forge_version = ""
+    }
+
     return $resolved
 }
 
@@ -240,6 +280,18 @@ function Has-RequiredLaneDeps {
         [string]::IsNullOrWhiteSpace($Deps.neoforge_version) -or
         [string]::IsNullOrWhiteSpace($Deps.architectury_api_version)
     )
+}
+
+function Get-MissingLaneDeps {
+    param([Parameter(Mandatory = $true)]$Deps)
+    $missing = @()
+    if ([string]::IsNullOrWhiteSpace($Deps.yarn_mappings)) { $missing += "yarn_mappings" }
+    if ([string]::IsNullOrWhiteSpace($Deps.fabric_loader_version)) { $missing += "fabric_loader_version" }
+    if ([string]::IsNullOrWhiteSpace($Deps.fabric_api_version)) { $missing += "fabric_api_version" }
+    if ([string]::IsNullOrWhiteSpace($Deps.forge_version)) { $missing += "forge_version" }
+    if ([string]::IsNullOrWhiteSpace($Deps.neoforge_version)) { $missing += "neoforge_version" }
+    if ([string]::IsNullOrWhiteSpace($Deps.architectury_api_version)) { $missing += "architectury_api_version" }
+    return $missing
 }
 
 function Get-ReleaseStatePath {
@@ -280,7 +332,8 @@ function Invoke-GradleChecked {
             Start-Sleep -Seconds $DelaySeconds
             continue
         }
-        throw "Gradle command failed (exit $exitCode): ./gradlew $($gradlePrefix + $Arguments -join ' ')"
+        $tail = ($gradleOut | Select-Object -Last 60 | ForEach-Object { $_.ToString() }) -join "`n"
+        throw "Gradle command failed (exit $exitCode): ./gradlew $($gradlePrefix + $Arguments -join ' ')`nLast output:`n$tail"
     }
 }
 
@@ -320,11 +373,15 @@ function Invoke-Rollback {
     param(
         [Parameter(Mandatory = $true)][string]$OriginalVersion,
         [Parameter(Mandatory = $false)][string]$CurrentVersion,
-        [Parameter(Mandatory = $true)][bool]$VersionBumped
+        [Parameter(Mandatory = $true)][bool]$VersionBumped,
+        [int]$StartIndex = 0
     )
     Write-Warning "Release failed. Starting rollback..."
 
-    for ($i = $uploadRecords.Count - 1; $i -ge 0; $i--) {
+    if ($StartIndex -lt 0) { $StartIndex = 0 }
+    if ($StartIndex -gt $uploadRecords.Count) { $StartIndex = $uploadRecords.Count }
+
+    for ($i = $uploadRecords.Count - 1; $i -ge $StartIndex; $i--) {
         $rec = $uploadRecords[$i]
         if ($rec.Platform -eq "modrinth" -and $rec.VersionId) {
             Remove-ModrinthVersion -VersionId $rec.VersionId
@@ -343,33 +400,35 @@ function Invoke-Rollback {
     }
 }
 
-function Invoke-UploadPerLoader {
+function Invoke-UploadForSingleLoader {
     param(
+        [Parameter(Mandatory = $true)][ValidateSet("fabric", "forge", "neoforge")] [string]$Loader,
         [Parameter(Mandatory = $true)][ValidateSet("modrinth", "curseforge")] [string]$Platform
     )
-    foreach ($loader in $loaders) {
-        $state = Get-ReleaseStatePath -Version "$currentVersion-$loader" -Platform $Platform
-        if ((Test-Path $state) -and -not $ForceUpload) {
-            Write-Warning "Skipping $Platform/${loader}: already uploaded for version $currentVersion. Use -ForceUpload to override."
-            continue
-        }
-        Write-Host " - Upload $Platform ($loader)..."
-        $out = Invoke-GradleChecked @(":${loader}:$Platform") -Retries 3 -DelaySeconds 8
-        Set-Content -Path $state -Value "$(Get-Date -Format o) releaseType=$ReleaseType"
-
-        $versionId = ""
-        if ($Platform -eq "modrinth" -and $out -match "as version ID ([A-Za-z0-9]+)\.") {
-            $versionId = $Matches[1]
-        }
-        $uploadRecords.Add([PSCustomObject]@{
-            Platform = $Platform
-            Loader = $loader
-            ProjectId = (Get-EnvByLoader -Platform $Platform -Loader $loader)
-            Version = $currentVersion
-            VersionId = $versionId
-            StatePath = $state
-        }) | Out-Null
+    $state = Get-ReleaseStatePath -Version "$currentVersion-$Loader" -Platform $Platform
+    if ((Test-Path $state) -and -not $ForceUpload) {
+        Write-Warning "Skipping $Platform/${Loader}: already uploaded for version $currentVersion. Use -ForceUpload to override."
+        return
     }
+    Write-Host " - Upload $Platform ($Loader)..."
+    $out = Invoke-GradleChecked -Arguments @(":${Loader}:$Platform") -Retries 3 -DelaySeconds 8
+    Set-Content -Path $state -Value "$(Get-Date -Format o) releaseType=$ReleaseType"
+
+    $versionId = ""
+    if ($Platform -eq "modrinth") {
+        $match = [regex]::Match([string]$out, "as version ID ([A-Za-z0-9]+)\.")
+        if ($match.Success -and $match.Groups.Count -gt 1) {
+            $versionId = $match.Groups[1].Value
+        }
+    }
+    $uploadRecords.Add([PSCustomObject]@{
+        Platform = $Platform
+        Loader = $Loader
+        ProjectId = (Get-EnvByLoader -Platform $Platform -Loader $Loader)
+        Version = $currentVersion
+        VersionId = $versionId
+        StatePath = $state
+    }) | Out-Null
 }
 
 function New-LaneTemplate {
@@ -382,9 +441,9 @@ function New-LaneTemplate {
     $currentArchitectury = Get-GradleProperty -FilePath $multiGradleProps -Key "architectury_api_version"
 
     $versions = @(
-        "1.21.10","1.21.9","1.21.8","1.21.7","1.21.6","1.21.5","1.21.4","1.21.3","1.21.2","1.21.1","1.21.0",
+        "1.21.11","1.21.10","1.21.9","1.21.8","1.21.7","1.21.6","1.21.5","1.21.4","1.21.3","1.21.2","1.21.1",
         "1.20.6","1.20.5","1.20.4","1.20.3","1.20.2","1.20.1",
-        "1.19.4","1.19.3","1.19.2","1.19.1","1.19.0"
+        "1.19.4","1.19.3","1.19.2","1.19.1","1.19"
     )
     $lanes = foreach ($v in $versions) {
         [ordered]@{
@@ -411,44 +470,63 @@ function Invoke-SingleRelease {
     $script:originalVersion = Get-ModVersion
     $script:currentVersion = $script:originalVersion
     $script:versionBumped = $false
+    $runUploadStartIndex = $uploadRecords.Count
 
     try {
         Write-Host "1) Preflight build (must pass before version bump/upload)..."
-        Invoke-GradleChecked @(":common:build", ":fabric:build", ":forge:build", ":neoforge:build", "-x", "modrinth", "-x", "curseforge")
+        [void](Invoke-GradleChecked -Arguments @(":common:build", ":fabric:build", ":forge:build", ":neoforge:build", "-x", "modrinth", "-x", "curseforge"))
 
         Write-Host "2) Bump version..."
-        Invoke-GradleChecked @("bumpModVersion")
+        [void](Invoke-GradleChecked -Arguments @("bumpModVersion"))
         $script:versionBumped = $true
         $script:currentVersion = Get-ModVersion
         Write-Host "Current version: $script:currentVersion"
 
         Write-Host "3) Build artifact with bumped version..."
-        Invoke-GradleChecked @(":common:build", ":fabric:remapJar", ":forge:remapJar", ":neoforge:remapJar", ":fabric:sourcesJar", ":forge:sourcesJar", ":neoforge:sourcesJar")
+        [void](Invoke-GradleChecked -Arguments @(":common:build", ":fabric:remapJar", ":forge:remapJar", ":neoforge:remapJar", ":fabric:sourcesJar", ":forge:sourcesJar", ":neoforge:sourcesJar"))
 
         Write-Host "4) Generate release notes..."
-        Invoke-GradleChecked @("generateReleaseNotes")
+        [void](Invoke-GradleChecked -Arguments @("generateReleaseNotes"))
 
         Write-Host "5) Upload to Modrinth/CurseForge (if configured)..."
         $hasModrinth = ($env:MODRINTH_TOKEN -and $env:MODRINTH_PROJECT_ID)
         $hasCurseforge = ($env:CURSEFORGE_TOKEN -and $env:CURSEFORGE_PROJECT_ID)
 
-        if ($hasModrinth) {
-            Write-Host "5a) Upload Modrinth (fabric+forge+neoforge)..."
-            Invoke-UploadPerLoader -Platform "modrinth"
-        } else {
-            Write-Warning "Skipping Modrinth upload (missing token or project id)."
+        foreach ($loader in $loaders) {
+            Write-Host "5) Uploads for $loader on version $script:currentVersion..."
+            if ($hasModrinth) {
+                Invoke-UploadForSingleLoader -Loader $loader -Platform "modrinth"
+            } else {
+                Write-Warning "Skipping Modrinth upload (missing token or project id)."
+            }
+            if ($hasCurseforge) {
+                Invoke-UploadForSingleLoader -Loader $loader -Platform "curseforge"
+            } else {
+                Write-Warning "Skipping CurseForge upload (missing token or project id)."
+            }
         }
 
-        if ($hasCurseforge) {
-            Write-Host "5b) Upload CurseForge (fabric+forge+neoforge)..."
-            Invoke-UploadPerLoader -Platform "curseforge"
-        } else {
-            Write-Warning "Skipping CurseForge upload (missing token or project id)."
+        if ($StrictLaneComplete) {
+            foreach ($loader in $loaders) {
+                if ($hasModrinth) {
+                    $mState = Get-ReleaseStatePath -Version "$script:currentVersion-$loader" -Platform "modrinth"
+                    if (-not (Test-Path $mState)) {
+                        throw "Strict lane check failed: missing Modrinth state for $loader ($script:currentVersion)."
+                    }
+                }
+                if ($hasCurseforge) {
+                    $cState = Get-ReleaseStatePath -Version "$script:currentVersion-$loader" -Platform "curseforge"
+                    if (-not (Test-Path $cState)) {
+                        throw "Strict lane check failed: missing CurseForge state for $loader ($script:currentVersion)."
+                    }
+                }
+            }
         }
 
         Write-Host "Done."
     } catch {
-        Invoke-Rollback -OriginalVersion $script:originalVersion -CurrentVersion $script:currentVersion -VersionBumped $script:versionBumped
+        Write-Warning ("Release error: " + $_.Exception.Message)
+        Invoke-Rollback -OriginalVersion $script:originalVersion -CurrentVersion $script:currentVersion -VersionBumped $script:versionBumped -StartIndex $runUploadStartIndex
         throw
     }
 }
@@ -466,6 +544,9 @@ if (-not $Matrix) {
         if ($mc) {
             Write-Host "Auto-resolving dependencies for $mc ..."
             $d = Resolve-DependenciesForMc -MinecraftVersion $mc
+            if (-not (Has-RequiredLaneDeps -Deps $d)) {
+                throw "Auto-resolve failed for minecraft_version=$mc. Missing at least one dependency (yarn/fabric loader/fabric api/forge/neoforge/architectury)."
+            }
             Set-GradleProperty -FilePath $multiGradleProps -Key "yarn_mappings" -Value $d.yarn_mappings
             Set-GradleProperty -FilePath $multiGradleProps -Key "fabric_loader_version" -Value $d.fabric_loader_version
             Set-GradleProperty -FilePath $multiGradleProps -Key "fabric_api_version" -Value $d.fabric_api_version
@@ -498,20 +579,22 @@ try {
         if ($AutoResolveDeps) {
             Write-Host "Auto-resolving dependencies for lane $($lane.minecraft_version) ..."
             $resolved = Resolve-DependenciesForMc -MinecraftVersion "$($lane.minecraft_version)"
-            if (-not (Has-RequiredLaneDeps -Deps $resolved)) {
-                $msg = "Could not resolve full dependency set for lane $($lane.minecraft_version)."
+            $lane.yarn_mappings = $resolved.yarn_mappings
+            $lane.fabric_loader_version = $resolved.fabric_loader_version
+            $lane.fabric_api_version = $resolved.fabric_api_version
+            $lane.forge_version = $resolved.forge_version
+            $lane.neoforge_version = $resolved.neoforge_version
+            $lane.architectury_api_version = $resolved.architectury_api_version
+
+            if (-not (Has-RequiredLaneDeps -Deps $lane)) {
+                $missing = (Get-MissingLaneDeps -Deps $lane) -join ", "
+                $msg = "Could not resolve full dependency set for $($lane.minecraft_version). Missing: $missing"
                 if ($effectiveSkipFailedLanes) {
                     Write-Warning "$msg Skipping lane."
                     continue
                 }
                 throw $msg
             }
-            if ($resolved.yarn_mappings) { $lane.yarn_mappings = $resolved.yarn_mappings }
-            if ($resolved.fabric_loader_version) { $lane.fabric_loader_version = $resolved.fabric_loader_version }
-            if ($resolved.fabric_api_version) { $lane.fabric_api_version = $resolved.fabric_api_version }
-            if ($resolved.forge_version) { $lane.forge_version = $resolved.forge_version }
-            if ($resolved.neoforge_version) { $lane.neoforge_version = $resolved.neoforge_version }
-            if ($resolved.architectury_api_version) { $lane.architectury_api_version = $resolved.architectury_api_version }
         }
         Set-GradleProperty -FilePath $multiGradleProps -Key "minecraft_version" -Value "$($lane.minecraft_version)"
         Set-GradleProperty -FilePath $multiGradleProps -Key "yarn_mappings" -Value "$($lane.yarn_mappings)"
@@ -524,7 +607,7 @@ try {
             Invoke-SingleRelease
         } catch {
             if ($effectiveSkipFailedLanes) {
-                Write-Warning "Lane failed and was skipped: $($lane.minecraft_version)"
+                Write-Warning "Lane failed and was skipped: $($lane.minecraft_version). Reason: $($_.Exception.Message)"
                 continue
             }
             throw
